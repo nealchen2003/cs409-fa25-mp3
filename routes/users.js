@@ -1,6 +1,10 @@
 const User = require('../models/user');
 const Task = require('../models/task');
 
+function raiseDbError(res, err) {
+    return res.status(500).json({ message: 'Database Error', data: err });
+}
+
 module.exports = function(router) {
     router.route('/')
         .post(function(req, res) {
@@ -17,7 +21,7 @@ module.exports = function(router) {
 
             User.findOne({ email: user.email }, (err, existingUser) => {
                 if (err) {
-                    return res.status(500).send(err);
+                    return raiseDbError(res, err);
                 }
                 if (existingUser) {
                     return res.status(400).json({
@@ -28,7 +32,7 @@ module.exports = function(router) {
 
                 user.save(function(err) {
                     if (err) {
-                        return res.status(500).send(err);
+                        return raiseDbError(res, err);
                     }
                     res.status(201).json({
                         message: 'User created!',
@@ -75,7 +79,7 @@ module.exports = function(router) {
             if (req.query.count === 'true') {
                 query.countDocuments().exec(function(err, count) {
                     if (err) {
-                        return res.status(500).send(err);
+                        return raiseDbError(res, err);
                     }
                     res.json({
                         message: "OK",
@@ -85,7 +89,7 @@ module.exports = function(router) {
             } else {
                 query.exec(function(err, users) {
                     if (err) {
-                        return res.status(500).send(err);
+                        return raiseDbError(res, err);
                     }
                     res.json({
                         message: "OK",
@@ -97,7 +101,7 @@ module.exports = function(router) {
 
     router.route('/:id')
         .get(function(req, res) {
-            let query = User.findById(req.params.id);
+            var query = User.findById(req.params.id);
 
             if (req.query.select) {
                 try {
@@ -109,7 +113,7 @@ module.exports = function(router) {
 
             query.exec(function(err, user) {
                 if (err) {
-                    return res.status(500).send(err);
+                    return raiseDbError(res, err);
                 }
                 if (!user) {
                     return res.status(404).json({
@@ -126,7 +130,7 @@ module.exports = function(router) {
         .put(function(req, res) {
             User.findById(req.params.id, function(err, user) {
                 if (err) {
-                    return res.status(500).send(err);
+                    return raiseDbError(res, err);
                 }
                 if (!user) {
                     return res.status(404).json({
@@ -135,22 +139,53 @@ module.exports = function(router) {
                     });
                 }
 
-                user.name = req.body.name;
-                user.email = req.body.email;
-                if (req.body.pendingTasks) {
-                    user.pendingTasks = req.body.pendingTasks;
+                let removedTasks = [];
+                let newTasks = [];
+                let renamedTasks = [];
+
+                if (req.body.name) {
+                    user.name = req.body.name;
+                    renamedTasks = user.pendingTasks.slice(); // all pending tasks need to be renamed
                 }
 
-                if (!user.name || !user.email) {
-                    return res.status(400).json({
-                        message: 'Validation Error: Name and email are required.',
-                        data: {}
-                    });
+                if (req.body.email) {
+                    user.email = req.body.email;
+                }
+
+                if (req.body.pendingTasks) {
+                    // unassign tasks that are no longer pending
+                    removedTasks = user.pendingTasks.filter(t => !req.body.pendingTasks.includes(t));
+                    // assign new pending tasks
+                    newTasks = req.body.pendingTasks.filter(t => !user.pendingTasks.includes(t));
+                    renamedTasks = user.pendingTasks.filter(t => !removedTasks.includes(t));
+
+                    user.pendingTasks = req.body.pendingTasks;
                 }
 
                 user.save(function(err) {
                     if (err) {
-                        return res.status(500).send(err);
+                        return raiseDbError(res, err);
+                    }
+                    if (removedTasks.length > 0) {
+                        Task.updateMany({ _id: { $in: removedTasks } }, { assignedUser: "", assignedUserName: "unassigned" }, function(err) {
+                            if (err) {
+                                return raiseDbError(res, err);
+                            }
+                        });
+                    }
+                    if (newTasks.length > 0) {
+                        Task.updateMany({ _id: { $in: newTasks } }, { assignedUser: user._id, assignedUserName: user.name }, function(err) {
+                            if (err) {
+                                return raiseDbError(res, err);
+                            }
+                        });
+                    }
+                    if (renamedTasks.length > 0) {
+                        Task.updateMany({ _id: { $in: renamedTasks } }, { assignedUserName: user.name }, function(err) {
+                            if (err) {
+                                return raiseDbError(res, err);
+                            }
+                        });
                     }
                     res.json({
                         message: 'User updated!',
@@ -162,7 +197,7 @@ module.exports = function(router) {
         .delete(function(req, res) {
             User.findByIdAndRemove(req.params.id, function(err, user) {
                 if (err) {
-                    return res.status(500).send(err);
+                    return raiseDbError(res, err);
                 }
                 if (!user) {
                     return res.status(404).json({
@@ -174,9 +209,9 @@ module.exports = function(router) {
                 // Unassign tasks from the deleted user
                 Task.updateMany({ assignedUser: user._id }, { assignedUser: "", assignedUserName: "unassigned" }, function(err) {
                     if (err) {
-                        return res.status(500).send(err);
+                        return raiseDbError(res, err);
                     }
-                    res.status(200).json({
+                    res.status(204).json({
                         message: 'User deleted!'
                     });
                 });

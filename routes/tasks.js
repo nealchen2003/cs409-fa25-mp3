@@ -1,6 +1,10 @@
 const Task = require('../models/task');
 const User = require('../models/user');
 
+function raiseDbError(res, err) {
+    return res.status(500).json({ message: 'Database Error', data: err });
+}
+
 module.exports = function(router) {
     router.route('/')
         .post(function(req, res) {
@@ -20,7 +24,7 @@ module.exports = function(router) {
 
             task.save(function(err) {
                 if (err) {
-                    return res.status(500).send(err);
+                    return raiseDbError(res, err);
                 }
                 res.status(201).json({
                     message: 'Task created!',
@@ -66,7 +70,7 @@ module.exports = function(router) {
             if (req.query.count === 'true') {
                 query.countDocuments().exec(function(err, count) {
                     if (err) {
-                        return res.status(500).send(err);
+                        return raiseDbError(res, err);
                     }
                     res.json({
                         message: "OK",
@@ -76,7 +80,7 @@ module.exports = function(router) {
             } else {
                 query.exec(function(err, tasks) {
                     if (err) {
-                        return res.status(500).send(err);
+                        return raiseDbError(res, err);
                     }
                     res.json({
                         message: "OK",
@@ -88,7 +92,7 @@ module.exports = function(router) {
 
     router.route('/:id')
         .get(function(req, res) {
-            let query = Task.findById(req.params.id);
+            var query = Task.findById(req.params.id);
 
             if (req.query.select) {
                 try {
@@ -100,7 +104,7 @@ module.exports = function(router) {
 
             query.exec(function(err, task) {
                 if (err) {
-                    return res.status(500).send(err);
+                    return raiseDbError(res, err);
                 }
                 if (!task) {
                     return res.status(404).json({
@@ -117,7 +121,7 @@ module.exports = function(router) {
         .put(function(req, res) {
             Task.findById(req.params.id, function(err, task) {
                 if (err) {
-                    return res.status(500).send(err);
+                    return raiseDbError(res, err);
                 }
                 if (!task) {
                     return res.status(404).json({
@@ -144,7 +148,7 @@ module.exports = function(router) {
 
                 task.save(function(err) {
                     if (err) {
-                        return res.status(500).send(err);
+                        return raiseDbError(res, err);
                     }
 
                     // If assigned user changed, update both old and new users
@@ -179,7 +183,7 @@ module.exports = function(router) {
         .delete(function(req, res) {
             Task.findByIdAndRemove(req.params.id, function(err, task) {
                 if (err) {
-                    return res.status(500).send(err);
+                    return raiseDbError(res, err);
                 }
                 if (!task) {
                     return res.status(404).json({
@@ -198,7 +202,7 @@ module.exports = function(router) {
                     });
                 }
 
-                res.status(200).json({
+                res.status(204).json({
                     message: 'Task deleted!'
                 });
             });
