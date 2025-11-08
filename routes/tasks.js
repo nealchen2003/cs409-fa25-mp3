@@ -9,7 +9,6 @@ function raiseDbError(res, err) {
 module.exports = function(router) {
     router.route('/')
         .post(async function(req, res) {
-            console.log(req.body);
             if (!req.body.name || !req.body.deadline) {
                 return res.status(400).json({
                     message: 'Validation Error: Name and deadline are required.',
@@ -59,7 +58,6 @@ module.exports = function(router) {
 
                 await session.commitTransaction();
 
-                console.log(inserted);
                 res.status(201).json({
                     message: 'Task created!',
                     data: inserted
@@ -176,7 +174,7 @@ module.exports = function(router) {
                 }
 
                 const oldAssignedUser = task.assignedUser;
-                const newAssignedUser = req.body.assignedUser;
+                const newAssignedUser = req.body.assignedUser === undefined ? task.assignedUser : req.body.assignedUser;
 
                 task.name = req.body.name || task.name;
                 task.deadline = req.body.deadline || task.deadline;
@@ -190,7 +188,7 @@ module.exports = function(router) {
                     });
                 }
                 task.assignedUser = newAssignedUser;
-                task.assignedUserName = req.body.assignedUserName || 'unassigned';
+                task.assignedUserName = req.body.assignedUserName || task.assignedUserName;
 
                 await task.save({ session });
 

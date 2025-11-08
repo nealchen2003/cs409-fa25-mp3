@@ -39,7 +39,6 @@ module.exports = function(router) {
                         { assignedUser: user._id.toString(), assignedUserName: user.name },
                         { session, upsert: false }
                     );
-                    console.log(ret.n);
                     if (ret.n !== user.pendingTasks.length) {
                         await session.abortTransaction();
                         return res.status(400).json({
@@ -167,7 +166,10 @@ module.exports = function(router) {
                 }
 
                 const oldPendingTasks = user.pendingTasks.map(t => t.toString());
-                const newPendingTasks = req.body.pendingTasks || oldPendingTasks;
+                let newPendingTasks = req.body.pendingTasks || oldPendingTasks;
+                // unique
+                const newPendingTasksSet = new Set(newPendingTasks);
+                newPendingTasks = Array.from(newPendingTasksSet);
 
                 user.name = req.body.name || user.name;
                 user.email = req.body.email || user.email;
