@@ -1,5 +1,6 @@
 const User = require('../models/user');
 const Task = require('../models/task');
+const mongoose = require('mongoose');
 
 function raiseDbError(res, err) {
     return res.status(500).json({ message: 'Database Error', data: err });
@@ -7,39 +8,58 @@ function raiseDbError(res, err) {
 
 module.exports = function(router) {
     router.route('/')
-        .post(function(req, res) {
-            const user = new User();
-            user.name = req.body.name;
-            user.email = req.body.email;
-
-            if (!user.name || !user.email) {
+        .post(async function(req, res) {
+            if (!req.body.name || !req.body.email) {
                 return res.status(400).json({
                     message: 'Validation Error: Name and email are required.',
                     data: {}
                 });
             }
 
-            User.findOne({ email: user.email }, (err, existingUser) => {
-                if (err) {
-                    return raiseDbError(res, err);
-                }
+            session = await mongoose.startSession();
+            session.startTransaction();
+            try {
+                const existingUser = await User.findOne({ email: req.body.email }).session(session);
                 if (existingUser) {
+                    await session.abortTransaction();
                     return res.status(400).json({
                         message: 'Validation Error: Email already exists.',
                         data: {}
                     });
                 }
-
-                user.save(function(err) {
-                    if (err) {
-                        return raiseDbError(res, err);
-                    }
-                    res.status(201).json({
-                        message: 'User created!',
-                        data: user
-                    });
+                const user = new User({
+                    name: req.body.name,
+                    email: req.body.email,
+                    pendingTasks: req.body.pendingTasks || []
                 });
-            });
+                if (user.pendingTasks.length > 0) {
+                    // check that all tasks exist and are unassigned
+                    const ret = await Task.updateMany(
+                        { _id: { $in: user.pendingTasks }, assignedUser: "" },
+                        { assignedUser: user._id.toString(), assignedUserName: user.name },
+                        { session, upsert: false }
+                    );
+                    console.log(ret.n);
+                    if (ret.n !== user.pendingTasks.length) {
+                        await session.abortTransaction();
+                        return res.status(400).json({
+                            message: 'Validation Error: One or more tasks do not exist or are already assigned.',
+                            data: {}
+                        });
+                    }
+                }
+                inserted = await user.save( { session } )
+                await session.commitTransaction();
+                return res.status(201).json({
+                    message: 'User created!',
+                    data: inserted
+                });
+            } catch (error) {
+                await session.abortTransaction();
+                return res.status(500).json({ message: 'Error creating user', data: error.toString() });
+            } finally {
+                await session.endSession();
+            }
         })
         .get(function(req, res) {
             let query = User.find();
@@ -69,11 +89,19 @@ module.exports = function(router) {
             }
 
             if (req.query.skip) {
-                query.skip(parseInt(req.query.skip));
+                try {
+                    query.skip(parseInt(req.query.skip));
+                } catch (e) {
+                    return res.status(400).json({ message: "Invalid 'skip' parameter", data: {} });
+                }
             }
 
             if (req.query.limit) {
-                query.limit(parseInt(req.query.limit));
+                try {
+                    query.limit(parseInt(req.query.limit));
+                } catch (e) {
+                    return res.status(400).json({ message: "Invalid 'limit' parameter", data: {} });
+                }
             }
 
             if (req.query.count === 'true') {
@@ -127,95 +155,72 @@ module.exports = function(router) {
                 });
             });
         })
-        .put(function(req, res) {
-            User.findById(req.params.id, function(err, user) {
-                if (err) {
-                    return raiseDbError(res, err);
-                }
+        .put(async function(req, res) {
+            const session = await mongoose.startSession();
+            session.startTransaction();
+            try {
+                const user = await User.findById(req.params.id).session(session);
                 if (!user) {
-                    return res.status(404).json({
-                        message: 'User not found',
-                        data: {}
-                    });
+                    await session.abortTransaction();
+                    await session.endSession();
+                    return res.status(404).json({ message: 'User not found' });
                 }
 
-                let removedTasks = [];
-                let newTasks = [];
-                let renamedTasks = [];
+                const oldPendingTasks = user.pendingTasks.map(t => t.toString());
+                const newPendingTasks = req.body.pendingTasks || oldPendingTasks;
+
+                user.name = req.body.name || user.name;
+                user.email = req.body.email || user.email;
+                user.pendingTasks = newPendingTasks;
+
+                await user.save({ session });
+
+                const addedTasks = newPendingTasks.filter(t => !oldPendingTasks.includes(t));
+                const removedTasks = oldPendingTasks.filter(t => !newPendingTasks.includes(t));
 
                 if (req.body.name) {
-                    user.name = req.body.name;
-                    renamedTasks = user.pendingTasks.slice(); // all pending tasks need to be renamed
+                    await Task.updateMany({ _id: { $in: oldPendingTasks } }, { assignedUserName: user.name }).session(session);
+                }
+                if (addedTasks.length > 0) {
+                    await Task.updateMany({ _id: { $in: addedTasks } }, { assignedUser: user._id.toString(), assignedUserName: user.name }).session(session);
+                }
+                if (removedTasks.length > 0) {
+                    await Task.updateMany({ _id: { $in: removedTasks } }, { assignedUser: '', assignedUserName: 'unassigned' }).session(session);
                 }
 
-                if (req.body.email) {
-                    user.email = req.body.email;
-                }
+                await session.commitTransaction();
+                res.json({ message: 'User updated!', data: user });
 
-                if (req.body.pendingTasks) {
-                    // unassign tasks that are no longer pending
-                    removedTasks = user.pendingTasks.filter(t => !req.body.pendingTasks.includes(t));
-                    // assign new pending tasks
-                    newTasks = req.body.pendingTasks.filter(t => !user.pendingTasks.includes(t));
-                    renamedTasks = user.pendingTasks.filter(t => !removedTasks.includes(t));
-
-                    user.pendingTasks = req.body.pendingTasks;
-                }
-
-                user.save(function(err) {
-                    if (err) {
-                        return raiseDbError(res, err);
-                    }
-                    if (removedTasks.length > 0) {
-                        Task.updateMany({ _id: { $in: removedTasks } }, { assignedUser: "", assignedUserName: "unassigned" }, function(err) {
-                            if (err) {
-                                return raiseDbError(res, err);
-                            }
-                        });
-                    }
-                    if (newTasks.length > 0) {
-                        Task.updateMany({ _id: { $in: newTasks } }, { assignedUser: user._id, assignedUserName: user.name }, function(err) {
-                            if (err) {
-                                return raiseDbError(res, err);
-                            }
-                        });
-                    }
-                    if (renamedTasks.length > 0) {
-                        Task.updateMany({ _id: { $in: renamedTasks } }, { assignedUserName: user.name }, function(err) {
-                            if (err) {
-                                return raiseDbError(res, err);
-                            }
-                        });
-                    }
-                    res.json({
-                        message: 'User updated!',
-                        data: user
-                    });
-                });
-            });
+            } catch (error) {
+                await session.abortTransaction();
+                res.status(500).json({ message: 'Error updating user', data: error.toString() });
+            } finally {
+                await session.endSession();
+            }
         })
-        .delete(function(req, res) {
-            User.findByIdAndRemove(req.params.id, function(err, user) {
-                if (err) {
-                    return raiseDbError(res, err);
-                }
+        .delete(async function(req, res) {
+            const session = await mongoose.startSession();
+            session.startTransaction();
+            try {
+                const user = await User.findById(req.params.id).session(session);
                 if (!user) {
-                    return res.status(404).json({
-                        message: 'User not found',
-                        data: {}
-                    });
+                    await session.abortTransaction();
+                    await session.endSession();
+                    return res.status(404).json({ message: 'User not found' });
                 }
 
-                // Unassign tasks from the deleted user
-                Task.updateMany({ assignedUser: user._id }, { assignedUser: "", assignedUserName: "unassigned" }, function(err) {
-                    if (err) {
-                        return raiseDbError(res, err);
-                    }
-                    res.status(204).json({
-                        message: 'User deleted!'
-                    });
-                });
-            });
+                await Task.updateMany({ _id: { $in: user.pendingTasks } }, { assignedUser: '', assignedUserName: 'unassigned' }).session(session);
+                await User.deleteOne({ _id: req.params.id }).session(session);
+
+                await session.commitTransaction();
+                res.status(204).send();
+
+            } catch (error) {
+                await session.abortTransaction();
+                res.status(500).json({ message: 'Error deleting user', data: error.toString() });
+            } finally {
+                await session.endSession();
+            }
         });
     return router;
 };

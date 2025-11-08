@@ -1,5 +1,6 @@
 const Task = require('../models/task');
 const User = require('../models/user');
+const mongoose = require('mongoose');
 
 function raiseDbError(res, err) {
     return res.status(500).json({ message: 'Database Error', data: err });
@@ -7,30 +8,68 @@ function raiseDbError(res, err) {
 
 module.exports = function(router) {
     router.route('/')
-        .post(function(req, res) {
-            const task = new Task();
-            task.name = req.body.name;
-            task.deadline = req.body.deadline;
-            task.description = req.body.description;
-            task.assignedUser = req.body.assignedUser;
-            task.assignedUserName = req.body.assignedUserName;
-
-            if (!task.name || !task.deadline) {
+        .post(async function(req, res) {
+            console.log(req.body);
+            if (!req.body.name || !req.body.deadline) {
                 return res.status(400).json({
                     message: 'Validation Error: Name and deadline are required.',
                     data: {}
                 });
             }
 
-            task.save(function(err) {
-                if (err) {
-                    return raiseDbError(res, err);
+            // completed could be "true", true, "false" or false
+            try {
+                var completed = req.body.completed === undefined ? false : JSON.parse(req.body.completed);
+            } catch (e) {
+                return res.status(400).json({
+                    message: 'Validation Error: \'completed\' must be a boolean value.',
+                    data: {}
+                });
+            }
+
+            const session = await mongoose.startSession();
+            session.startTransaction();
+
+            try {
+                const task = new Task({
+                    name: req.body.name,
+                    description: req.body.description || "",
+                    deadline: req.body.deadline,
+                    completed: completed,
+                    assignedUser: req.body.assignedUser || "",
+                    assignedUserName: req.body.assignedUserName || "unassigned"
+                });
+
+                if (task.assignedUser) {
+                    const user = await User.findById(task.assignedUser).session(session);
+                    if (!user) {
+                        await session.abortTransaction();
+                        return res.status(400).json({
+                            message: 'Validation Error: Assigned user does not exist.',
+                            data: {}
+                        });
+                    }
+                    if (!completed) {
+                        user.pendingTasks.push(task._id.toString());
+                        await user.save({ session });
+                    }
                 }
+
+                inserted = await task.save({ session });
+
+                await session.commitTransaction();
+
+                console.log(inserted);
                 res.status(201).json({
                     message: 'Task created!',
-                    data: task
+                    data: inserted
                 });
-            });
+            } catch (error) {
+                await session.abortTransaction();
+                res.status(500).json({ message: 'Error creating task', data: error.toString() });
+            } finally {
+                await session.endSession();
+            }
         })
         .get(function(req, res) {
             let query = Task.find();
@@ -60,11 +99,19 @@ module.exports = function(router) {
             }
 
             if (req.query.skip) {
-                query.skip(parseInt(req.query.skip));
+                try {
+                    query.skip(parseInt(req.query.skip));
+                } catch (e) {
+                    return res.status(400).json({ message: "Invalid 'skip' parameter", data: {} });
+                }
             }
 
             if (req.query.limit) {
-                query.limit(parseInt(req.query.limit));
+                try {
+                    query.limit(parseInt(req.query.limit));
+                } catch (e) {
+                    return res.status(400).json({ message: "Invalid 'limit' parameter", data: {} });
+                }
             }
 
             if (req.query.count === 'true') {
@@ -118,94 +165,89 @@ module.exports = function(router) {
                 });
             });
         })
-        .put(function(req, res) {
-            Task.findById(req.params.id, function(err, task) {
-                if (err) {
-                    return raiseDbError(res, err);
-                }
+        .put(async function(req, res) {
+            const session = await mongoose.startSession();
+            session.startTransaction();
+            try {
+                const task = await Task.findById(req.params.id).session(session);
                 if (!task) {
-                    return res.status(404).json({
-                        message: 'Task not found',
-                        data: {}
-                    });
+                    await session.abortTransaction();
+                    return res.status(404).json({ message: 'Task not found' });
                 }
 
                 const oldAssignedUser = task.assignedUser;
+                const newAssignedUser = req.body.assignedUser;
 
-                task.name = req.body.name;
-                task.deadline = req.body.deadline;
-                task.description = req.body.description;
-                task.completed = req.body.completed;
-                task.assignedUser = req.body.assignedUser;
-                task.assignedUserName = req.body.assignedUserName;
-
-                if (!task.name || !task.deadline) {
+                task.name = req.body.name || task.name;
+                task.deadline = req.body.deadline || task.deadline;
+                task.description = req.body.description || task.description;
+                try {
+                    task.completed = req.body.completed === undefined ? task.completed : JSON.parse(req.body.completed);
+                } catch (e) {
                     return res.status(400).json({
-                        message: 'Validation Error: Name and deadline are required.',
+                        message: 'Validation Error: \'completed\' must be a boolean value.',
                         data: {}
                     });
                 }
+                task.assignedUser = newAssignedUser;
+                task.assignedUserName = req.body.assignedUserName || 'unassigned';
 
-                task.save(function(err) {
-                    if (err) {
-                        return raiseDbError(res, err);
+                await task.save({ session });
+
+                if (oldAssignedUser) {
+                    await User.findByIdAndUpdate(oldAssignedUser, { $pull: { pendingTasks: task._id.toString() } }).session(session);
+                }
+
+                if (newAssignedUser) {
+                    let user = await User.findById(newAssignedUser).session(session);
+                    if (!user) {
+                        await session.abortTransaction();
+                        return res.status(400).json({
+                            message: 'Validation Error: Assigned user does not exist.',
+                            data: {}
+                        });
                     }
-
-                    // If assigned user changed, update both old and new users
-                    if (oldAssignedUser !== task.assignedUser) {
-                        // Remove task from old user's pendingTasks
-                        if (oldAssignedUser) {
-                            User.findById(oldAssignedUser, (err, oldUser) => {
-                                if (oldUser) {
-                                    oldUser.pendingTasks.pull(task._id);
-                                    oldUser.save();
-                                }
-                            });
-                        }
-                        // Add task to new user's pendingTasks
-                        if (task.assignedUser) {
-                            User.findById(task.assignedUser, (err, newUser) => {
-                                if (newUser) {
-                                    newUser.pendingTasks.push(task._id);
-                                    newUser.save();
-                                }
-                            });
-                        }
+                    if (!task.completed) {
+                        user.pendingTasks.push(task._id.toString());
+                        await user.save({ session });
                     }
+                }
 
-                    res.json({
-                        message: 'Task updated!',
-                        data: task
-                    });
-                });
-            });
+                await session.commitTransaction();
+                res.json({ message: 'Task updated!', data: task });
+            } catch (error) {
+                await session.abortTransaction();
+                res.status(500).json({ message: 'Error updating task', data: error.toString() });
+            } finally {
+                await session.endSession();
+            }
         })
-        .delete(function(req, res) {
-            Task.findByIdAndRemove(req.params.id, function(err, task) {
-                if (err) {
-                    return raiseDbError(res, err);
-                }
+        .delete(async function(req, res) {
+            const session = await mongoose.startSession();
+            session.startTransaction();
+            try {
+                const task = await Task.findById(req.params.id).session(session);
                 if (!task) {
-                    return res.status(404).json({
-                        message: 'Task not found',
-                        data: {}
-                    });
+                    await session.abortTransaction();
+                    await session.endSession();
+                    return res.status(404).json({ message: 'Task not found' });
                 }
 
-                // Remove task from assigned user's pendingTasks
                 if (task.assignedUser) {
-                    User.findById(task.assignedUser, (err, user) => {
-                        if (user) {
-                            user.pendingTasks.pull(task._id);
-                            user.save();
-                        }
-                    });
+                    await User.findByIdAndUpdate(task.assignedUser, { $pull: { pendingTasks: task._id.toString() } }).session(session);
                 }
 
-                res.status(204).json({
-                    message: 'Task deleted!'
-                });
-            });
+                await Task.deleteOne({ _id: req.params.id }).session(session);
+
+                await session.commitTransaction();
+                res.status(204).send();
+
+            } catch (error) {
+                await session.abortTransaction();
+                res.status(500).json({ message: 'Error deleting task', data: error.toString() });
+            } finally {
+                await session.endSession();
+            }
         });
     return router;
 };
