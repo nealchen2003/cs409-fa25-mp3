@@ -61,8 +61,6 @@ module.exports = function(router) {
 
             if (req.query.limit) {
                 query.limit(parseInt(req.query.limit));
-            } else {
-                query.limit(100);
             }
 
             if (req.query.count === 'true') {
